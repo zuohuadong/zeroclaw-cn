@@ -124,8 +124,8 @@ struct PbFrame {
     pub method: i32,
     #[prost(message, repeated, tag = "5")]
     pub headers: Vec<PbHeader>,
-    #[prost(bytes = "vec", optional, tag = "8")]
-    pub payload: Option<Vec<u8>>,
+    #[prost(bytes = "vec", tag = "6")]
+    pub payload: Vec<u8>,
 }
 
 impl PbFrame {
@@ -165,12 +165,14 @@ struct WsEndpoint {
 
 /// LarkEvent envelope (method=1 / type=event payload)
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct LarkEvent {
     header: LarkEventHeader,
     event: serde_json::Value,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct LarkEventHeader {
     event_type: String,
     #[allow(dead_code)]
@@ -178,12 +180,14 @@ struct LarkEventHeader {
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct MsgReceivePayload {
     sender: LarkSender,
     message: LarkMessage,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct LarkSender {
     sender_id: LarkSenderId,
     #[serde(default)]
@@ -191,11 +195,13 @@ struct LarkSender {
 }
 
 #[derive(Debug, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 struct LarkSenderId {
     open_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 struct LarkMessage {
     message_id: String,
     chat_id: String,
@@ -298,6 +304,8 @@ pub struct LarkChannel {
     mention_only: bool,
     /// When true, use Feishu (CN) endpoints; when false, use Lark (international).
     use_feishu: bool,
+    /// The platform (Lark or Feishu)
+    platform: LarkPlatform,
     /// How to receive events: WebSocket long-connection or HTTP webhook.
     receive_mode: crate::config::schema::LarkReceiveMode,
     /// Cached tenant access token
@@ -321,6 +329,7 @@ impl LarkChannel {
             verification_token,
             port,
             allowed_users,
+            mention_only,
             LarkPlatform::Lark,
         )
     }
@@ -331,6 +340,7 @@ impl LarkChannel {
         verification_token: String,
         port: Option<u16>,
         allowed_users: Vec<String>,
+        mention_only: bool,
         platform: LarkPlatform,
     ) -> Self {
         Self {
@@ -341,21 +351,16 @@ impl LarkChannel {
             allowed_users,
             resolved_bot_open_id: Arc::new(StdRwLock::new(None)),
             mention_only,
-            use_feishu: true,
+            use_feishu: matches!(platform, LarkPlatform::Feishu),
+            platform,
             receive_mode: crate::config::schema::LarkReceiveMode::default(),
             tenant_token: Arc::new(RwLock::new(None)),
             ws_seen_ids: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Build from `LarkConfig` using legacy compatibility:
-    /// when `use_feishu=true`, this instance routes to Feishu endpoints.
-    pub fn from_config(config: &crate::config::schema::LarkConfig) -> Self {
-        let platform = if config.use_feishu {
-            LarkPlatform::Feishu
-        } else {
-            LarkPlatform::Lark
-        };
+    /// Build from `LarkConfig`
+    pub fn from_lark_config(config: &crate::config::schema::LarkConfig) -> Self {
         let mut ch = Self::new_with_platform(
             config.app_id.clone(),
             config.app_secret.clone(),
@@ -363,9 +368,47 @@ impl LarkChannel {
             config.port,
             config.allowed_users.clone(),
             config.mention_only,
+            LarkPlatform::Lark,
         );
+        ch.mention_only = config.mention_only;
         ch.receive_mode = config.receive_mode.clone();
+        ch.use_feishu = false;
         ch
+    }
+
+    /// Build from `FeishuConfig`
+    pub fn from_feishu_config(config: &crate::config::schema::FeishuConfig) -> Self {
+        let mut ch = Self::new_with_platform(
+            config.app_id.clone(),
+            config.app_secret.clone(),
+            config.verification_token.clone().unwrap_or_default(),
+            config.port,
+            config.allowed_users.clone(),
+            true, // mention_only
+            LarkPlatform::Feishu,
+        );
+        ch.mention_only = true;
+        ch.receive_mode = config.receive_mode.clone();
+        ch.use_feishu = true;
+        ch
+    }
+
+    /// Build from `LarkConfig` using legacy compatibility:
+    /// when `use_feishu=true`, this instance routes to Feishu endpoints.
+    pub fn from_config(config: &crate::config::schema::LarkConfig) -> Self {
+        if config.use_feishu {
+            Self::from_feishu_config(&crate::config::schema::FeishuConfig {
+                app_id: config.app_id.clone(),
+                app_secret: config.app_secret.clone(),
+                encrypt_key: config.encrypt_key.clone(),
+                verification_token: config.verification_token.clone(),
+                allowed_users: config.allowed_users.clone(),
+                receive_mode: config.receive_mode.clone(),
+                port: config.port,
+            })
+        } else {
+            Self::from_lark_config(config)
+        }
     }
 
     fn http_client(&self) -> reqwest::Client {
@@ -579,7 +622,7 @@ impl LarkChannel {
                 key: "type".into(),
                 value: "ping".into(),
             }],
-            payload: None,
+            payload: Vec::new(),
         };
         if write
             .send(WsMsg::Binary(initial_ping.encode_to_vec().into()))
@@ -588,6 +631,7 @@ impl LarkChannel {
         {
             anyhow::bail!("Lark: initial ping failed");
         }
+        tracing::debug!("Lark: initial ping sent");
         // message_id → (fragment_slots, created_at) for multi-part reassembly
         type FragEntry = (Vec<Option<Vec<u8>>>, Instant);
         let mut frag_cache: HashMap<String, FragEntry> = HashMap::new();
@@ -601,7 +645,7 @@ impl LarkChannel {
                     let ping = PbFrame {
                         seq_id: seq, log_id: 0, service: service_id, method: 0,
                         headers: vec![PbHeader { key: "type".into(), value: "ping".into() }],
-                        payload: None,
+                        payload: Vec::new(),
                     };
                     if write.send(WsMsg::Binary(ping.encode_to_vec().into())).await.is_err() {
                         tracing::warn!("Lark: ping failed, reconnecting");
@@ -644,8 +688,8 @@ impl LarkChannel {
                     // CONTROL frame
                     if frame.method == 0 {
                         if frame.header_value("type") == "pong" {
-                            if let Some(p) = &frame.payload {
-                                if let Ok(cfg) = serde_json::from_slice::<WsClientConfig>(p) {
+                            if !frame.payload.is_empty() {
+                                if let Ok(cfg) = serde_json::from_slice::<WsClientConfig>(&frame.payload) {
                                     if let Some(secs) = cfg.ping_interval {
                                         let secs = secs.max(10);
                                         if secs != ping_secs {
@@ -666,10 +710,12 @@ impl LarkChannel {
                     let sum      = frame.header_value("sum").parse::<usize>().unwrap_or(1);
                     let seq_num  = frame.header_value("seq").parse::<usize>().unwrap_or(0);
 
+                    tracing::debug!("Lark WS: received frame type='{}' id='{}' seq={}/{}", msg_type, msg_id, seq_num, sum);
+
                     // ACK immediately (Feishu requires within 3 s)
                     {
                         let mut ack = frame.clone();
-                        ack.payload = Some(br#"{"code":200,"headers":{},"data":[]}"#.to_vec());
+                        ack.payload = br#"{"code":200,"headers":{},"data":[]}"#.to_vec();
                         ack.headers.push(PbHeader { key: "biz_rt".into(), value: "0".into() });
                         let _ = write.send(WsMsg::Binary(ack.encode_to_vec().into())).await;
                     }
@@ -677,12 +723,12 @@ impl LarkChannel {
                     // Fragment reassembly
                     let sum = if sum == 0 { 1 } else { sum };
                     let payload: Vec<u8> = if sum == 1 || msg_id.is_empty() || seq_num >= sum {
-                        frame.payload.clone().unwrap_or_default()
+                        frame.payload.clone()
                     } else {
                         let entry = frag_cache.entry(msg_id.clone())
                             .or_insert_with(|| (vec![None; sum], Instant::now()));
                         if entry.0.len() != sum { *entry = (vec![None; sum], Instant::now()); }
-                        entry.0[seq_num] = frame.payload.clone();
+                        entry.0[seq_num] = Some(frame.payload.clone());
                         if entry.0.iter().all(|s| s.is_some()) {
                             let full: Vec<u8> = entry.0.iter()
                                 .flat_map(|s| s.as_deref().unwrap_or(&[]))
@@ -692,13 +738,25 @@ impl LarkChannel {
                         } else { continue; }
                     };
 
-                    if msg_type != "event" { continue; }
+                    if msg_type != "event" { 
+                        tracing::debug!("Lark WS: skipping non-event frame type='{}'", msg_type);
+                        continue; 
+                    }
 
                     let event: LarkEvent = match serde_json::from_slice(&payload) {
                         Ok(e) => e,
-                        Err(e) => { tracing::error!("Lark: event JSON: {e}"); continue; }
+                        Err(e) => { 
+                            tracing::error!("Lark: event JSON parse error: {}. Payload: {}", e, String::from_utf8_lossy(&payload)); 
+                            continue; 
+                        }
                     };
-                    if event.header.event_type != "im.message.receive_v1" { continue; }
+                    
+                    tracing::debug!("Lark WS: received event '{}'", event.header.event_type);
+                    
+                    if event.header.event_type != "im.message.receive_v1" { 
+                        tracing::debug!("Lark WS: skipping event type '{}'", event.header.event_type);
+                        continue; 
+                    }
 
                     let event_payload = event.event;
 
