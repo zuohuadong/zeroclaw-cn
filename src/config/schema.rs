@@ -4870,6 +4870,34 @@ impl Config {
             self.proxy.apply_to_process_env();
         }
 
+        // Feishu: ZEROCLAW_FEISHU_APP_ID and ZEROCLAW_FEISHU_APP_SECRET
+        if let Ok(app_id) = std::env::var("ZEROCLAW_FEISHU_APP_ID") {
+            if !app_id.trim().is_empty() {
+                let config = self.channels_config.feishu.get_or_insert_with(Default::default);
+                config.app_id = app_id.trim().to_string();
+            }
+        }
+        if let Ok(app_secret) = std::env::var("ZEROCLAW_FEISHU_APP_SECRET") {
+            if !app_secret.trim().is_empty() {
+                let config = self.channels_config.feishu.get_or_insert_with(Default::default);
+                config.app_secret = app_secret.trim().to_string();
+            }
+        }
+
+        // Lark: ZEROCLAW_LARK_APP_ID and ZEROCLAW_LARK_APP_SECRET
+        if let Ok(app_id) = std::env::var("ZEROCLAW_LARK_APP_ID") {
+            if !app_id.trim().is_empty() {
+                let config = self.channels_config.lark.get_or_insert_with(Default::default);
+                config.app_id = app_id.trim().to_string();
+            }
+        }
+        if let Ok(app_secret) = std::env::var("ZEROCLAW_LARK_APP_SECRET") {
+            if !app_secret.trim().is_empty() {
+                let config = self.channels_config.lark.get_or_insert_with(Default::default);
+                config.app_secret = app_secret.trim().to_string();
+            }
+        }
+
         set_runtime_proxy_config(self.proxy.clone());
     }
 
