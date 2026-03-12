@@ -963,7 +963,159 @@ pub fn handle_command(command: crate::SkillCommands, config: &crate::config::Con
             );
             Ok(())
         }
+        crate::SkillCommands::Find { query } => {
+            find_skills(&query, workspace_dir, config)
+        }
     }
+}
+
+/// A simplified skill representation for find results
+struct FindResult {
+    name: String,
+    description: String,
+    source: String,
+    install_cmd: Option<String>,
+    url: Option<String>,
+}
+
+fn find_skills(query: &str, workspace_dir: &Path, config: &crate::config::Config) -> Result<()> {
+    let query_lower = query.to_lowercase();
+    let mut results = Vec::new();
+
+    // 1. Search local skills
+    let local_skills = load_skills_with_config(workspace_dir, config);
+    for skill in local_skills {
+        if skill.name.to_lowercase().contains(&query_lower) ||
+           skill.description.to_lowercase().contains(&query_lower) {
+            results.push(FindResult {
+                name: skill.name,
+                description: skill.description,
+                source: "local".to_string(),
+                install_cmd: None,
+                url: None,
+            });
+        }
+    }
+
+    // 2. Search Open-Skills if enabled and synced
+    if let Some(open_skills_dir) = resolve_open_skills_dir(config.skills.open_skills_dir.as_deref()) {
+        let nested_skills_dir = open_skills_dir.join("skills");
+        if nested_skills_dir.is_dir() {
+            let open_skills = load_skills_from_directory(&nested_skills_dir);
+            for skill in open_skills {
+                if skill.name.to_lowercase().contains(&query_lower) ||
+                   skill.description.to_lowercase().contains(&query_lower) {
+                    // Check if already in results (local takes priority)
+                    if !results.iter().any(|r| r.name == skill.name) {
+                        results.push(FindResult {
+                            name: skill.name.clone(),
+                            description: skill.description,
+                            source: "open-skills".to_string(),
+                            install_cmd: Some(format!("zeroclaw skills install https://github.com/besoeasy/open-skills/tree/main/skills/{}", skill.name)),
+                            url: Some(format!("https://github.com/besoeasy/open-skills/tree/main/skills/{}", skill.name)),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Curated Skills from skills.sh and other sources
+    let curated = vec![
+        FindResult {
+            name: "frontend-design".to_string(),
+            description: "Frontend design patterns and best practices by Anthropic.".to_string(),
+            source: "skills.sh".to_string(),
+            install_cmd: Some("zeroclaw skills install https://skills.sh/anthropics/skills/frontend-design".to_string()),
+            url: Some("https://skills.sh/anthropics/skills/frontend-design".to_string()),
+        },
+        FindResult {
+            name: "browser-use".to_string(),
+            description: "Browser automation and interaction skills.".to_string(),
+            source: "skills.sh".to_string(),
+            install_cmd: Some("zeroclaw skills install https://skills.sh/browser-use/browser-use/browser-use".to_string()),
+            url: Some("https://skills.sh/browser-use/browser-use/browser-use".to_string()),
+        },
+        FindResult {
+            name: "copywriting".to_string(),
+            description: "Marketing and conversion-focused copywriting skills.".to_string(),
+            source: "skills.sh".to_string(),
+            install_cmd: Some("zeroclaw skills install https://skills.sh/coreyhaines31/marketingskills/copywriting".to_string()),
+            url: Some("https://skills.sh/coreyhaines31/marketingskills/copywriting".to_string()),
+        },
+        FindResult {
+            name: "pdf-manipulation".to_string(),
+            description: "PDF parsing, generation, and manipulation guidelines.".to_string(),
+            source: "skills.sh".to_string(),
+            install_cmd: Some("zeroclaw skills install https://skills.sh/anthropics/skills/pdf".to_string()),
+            url: Some("https://skills.sh/anthropics/skills/pdf".to_string()),
+        },
+        FindResult {
+            name: "vercel-react-best-practices".to_string(),
+            description: "React and Next.js performance optimization guidelines from Vercel Engineering.".to_string(),
+            source: "skills.sh".to_string(),
+            install_cmd: Some("zeroclaw skills install https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices".to_string()),
+            url: Some("https://skills.sh/vercel-labs/agent-skills/vercel-react-best-practices".to_string()),
+        },
+        FindResult {
+            name: "using-web-scraping".to_string(),
+            description: "Web scraping techniques using various tools.".to_string(),
+            source: "open-skills".to_string(),
+            install_cmd: Some("zeroclaw skills install https://github.com/besoeasy/open-skills/tree/main/skills/using-web-scraping".to_string()),
+            url: Some("https://github.com/besoeasy/open-skills/tree/main/skills/using-web-scraping".to_string()),
+        },
+        FindResult {
+            name: "send-email-programmatically".to_string(),
+            description: "Automation for sending emails with attachments.".to_string(),
+            source: "open-skills".to_string(),
+            install_cmd: Some("zeroclaw skills install https://github.com/besoeasy/open-skills/tree/main/skills/send-email-programmatically".to_string()),
+            url: Some("https://github.com/besoeasy/open-skills/tree/main/skills/send-email-programmatically".to_string()),
+        },
+    ];
+
+    for skill in curated {
+        if skill.name.to_lowercase().contains(&query_lower) ||
+           skill.description.to_lowercase().contains(&query_lower) {
+            // Only add if not already present
+            if !results.iter().any(|r| r.name == skill.name) {
+                results.push(skill);
+            }
+        }
+    }
+
+    if results.is_empty() {
+        println!("No skills found matching '{}'.", query);
+        println!("Try a different query or browse https://skills.sh/ for more.");
+    } else {
+        println!("Found {} skill(s) matching '{}':", results.len(), query);
+        println!();
+        for res in results {
+            let mut style = console::style(&res.name).white().bold();
+            let source_style = match res.source.as_str() {
+                "local" => console::style(format!("[{}]", res.source)).green(),
+                "open-skills" => console::style(format!("[{}]", res.source)).cyan(),
+                "skills.sh" => console::style(format!("[{}]", res.source)).blue(),
+                _ => console::style(format!("[{}]", res.source)).white(),
+            };
+
+            println!(
+                "  {} {} — {}",
+                style,
+                source_style,
+                res.description
+            );
+
+            if let Some(cmd) = res.install_cmd {
+                println!("    Install: {}", console::style(cmd).dim());
+            }
+            if let Some(url) = res.url {
+                println!("    Details: {}", console::style(url).dim().underlined());
+            }
+            println!();
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -224,6 +224,11 @@ pub enum SkillCommands {
         /// Skill name to remove
         name: String,
     },
+    /// Find skills by name or description
+    Find {
+        /// Search query
+        query: String,
+    },
 }
 
 /// Migration subcommands
